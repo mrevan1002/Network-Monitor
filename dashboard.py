@@ -65,7 +65,6 @@ class Dashboard:
         self.ping_warning_ms = 100.0
         self.loss_warning_percent = 5.0
 
-        # Timestamp-based history: actual last 60 seconds.
         self.traffic_history = deque()
 
         self.successful_pings = deque(maxlen=10)
@@ -108,6 +107,30 @@ class Dashboard:
             target=self.background_metrics,
             daemon=True
         ).start()
+
+    # ===================== HELPERS =====================
+
+    @staticmethod
+    def shorten_text(value, max_length=24):
+        value = str(value)
+
+        if len(value) > max_length:
+            return value[:max_length - 3] + "..."
+
+        return value
+
+    @staticmethod
+    def safe_number(value, default=0.0):
+        try:
+            number = float(value)
+
+            if number != number or number == float("inf"):
+                return default
+
+            return number
+
+        except (TypeError, ValueError):
+            return default
 
     # ===================== MAIN UI =====================
 
@@ -241,13 +264,6 @@ class Dashboard:
             details, "Jitter (Avg.)", "N/A"
         )
 
-        ctk.CTkLabel(
-            self.sidebar,
-            text="Network Monitor • v3.2",
-            font=("Segoe UI", 10),
-            text_color="#52627A"
-        ).pack(side="bottom", pady=(0, 5))
-
     def create_sidebar_detail(self, parent, title, initial):
         item = ctk.CTkFrame(
             parent,
@@ -266,9 +282,12 @@ class Dashboard:
             item,
             text=initial,
             font=("Segoe UI", 11, "bold"),
-            text_color=TEXT
+            text_color=TEXT,
+            wraplength=165,
+            justify="left",
+            anchor="w"
         )
-        value.pack(anchor="w", pady=(2, 0))
+        value.pack(anchor="w", pady=(2, 0), fill="x")
 
         return value
 
@@ -542,19 +561,25 @@ class Dashboard:
             card,
             text=title,
             font=("Segoe UI", 9, "bold"),
-            text_color=MUTED
+            text_color=MUTED,
+            wraplength=190,
+            justify="left"
         ).pack(anchor="w", padx=12, pady=(11, 4))
 
         value = ctk.CTkLabel(
             card,
             text=initial,
             font=("Segoe UI", 16, "bold"),
-            text_color=accent
+            text_color=accent,
+            wraplength=190,
+            justify="left",
+            anchor="w"
         )
-        value.pack(anchor="w", padx=12, pady=(0, 11))
+        value.pack(anchor="w", padx=12, pady=(0, 11), fill="x")
 
         return {
             "card": card,
+            "title": card.winfo_children()[0],
             "value": value
         }
 
@@ -638,7 +663,7 @@ class Dashboard:
 
         self.ax.set_xlim(-60, 0)
         self.ax.set_xticks([-60, -45, -30, -15, 0])
-        self.ax.set_ylim(0, 1024)
+        self.ax.set_ylim(0, 1)
 
         self.download_line, = self.ax.plot(
             [],
@@ -719,7 +744,9 @@ class Dashboard:
             frame,
             text=initial,
             font=("Segoe UI", 11, "bold"),
-            text_color="#B6C4D9"
+            text_color="#B6C4D9",
+            wraplength=220,
+            justify="left"
         )
         value.pack(anchor="w", pady=(3, 0))
 
@@ -855,11 +882,16 @@ class Dashboard:
 
         def close_settings():
             self.settings_window = None
+
             try:
                 window.grab_release()
             except Exception:
                 pass
-            window.destroy()
+
+            try:
+                window.destroy()
+            except Exception:
+                pass
 
         def apply_settings():
             target = target_entry.get().strip()
@@ -878,7 +910,7 @@ class Dashboard:
                 ping_threshold = float(ping_entry.get())
                 loss_threshold = float(loss_entry.get())
 
-                if ping_threshold <= 0:
+                if not 0 < ping_threshold <= 60000:
                     raise ValueError
 
                 if not 0 <= loss_threshold <= 100:
@@ -916,7 +948,6 @@ class Dashboard:
             self.ping_warning_ms = ping_threshold
             self.loss_warning_percent = loss_threshold
 
-            # Invalidate any pending result from the old target.
             self.ping_generation += 1
             self.clear_queue()
 
@@ -926,9 +957,12 @@ class Dashboard:
             self.successful_pings.clear()
             self.jitter_value = None
 
-            self.ping_target_label.configure(text=target)
-            self.ping_card["card"].winfo_children()[0].configure(
-                text=f"PING • {target}"
+            self.ping_target_label.configure(
+                text=self.shorten_text(target, 25)
+            )
+
+            self.ping_card["title"].configure(
+                text=f"PING • {self.shorten_text(target, 22)}"
             )
 
             self.ping_card["value"].configure(
@@ -982,7 +1016,6 @@ class Dashboard:
         self.monitoring_enabled = not self.monitoring_enabled
         self.monitor_generation += 1
 
-        # Remove samples produced before the state change.
         self.clear_queue()
 
         if self.monitoring_enabled:
@@ -1029,8 +1062,12 @@ class Dashboard:
                     self.data_queue.put({
                         "type": "speed",
                         "generation": generation,
-                        "download": max(0.0, float(download)),
-                        "upload": max(0.0, float(upload)),
+                        "download": max(
+                            0.0, self.safe_number(download)
+                        ),
+                        "upload": max(
+                            0.0, self.safe_number(upload)
+                        ),
                         "timestamp": time.monotonic()
                     })
 
@@ -1101,8 +1138,6 @@ class Dashboard:
                     )
                     last_interface = time.monotonic()
 
-                # Discard results if pause/resume or target change
-                # happened while a network request was running.
                 if (
                     self.running
                     and self.monitoring_enabled
@@ -1131,11 +1166,16 @@ class Dashboard:
     # ===================== JITTER =====================
 
     def update_jitter(self, ping):
+        # Timeout does not erase the last valid jitter result.
         if ping is None:
-            self.jitter_value = None
             return
 
-        self.successful_pings.append(float(ping))
+        ping = self.safe_number(ping, default=None)
+
+        if ping is None:
+            return
+
+        self.successful_pings.append(ping)
 
         if len(self.successful_pings) < 2:
             self.jitter_value = None
@@ -1299,8 +1339,13 @@ class Dashboard:
                 text_color=YELLOW
             )
 
-        self.ip_card["value"].configure(text=self.latest_ip)
-        self.interface_label.configure(text=self.latest_interface)
+        self.ip_card["value"].configure(
+            text=self.shorten_text(self.latest_ip, 22)
+        )
+
+        self.interface_label.configure(
+            text=self.shorten_text(self.latest_interface, 30)
+        )
 
         jitter_text = (
             f"{self.jitter_value:.2f} ms"
@@ -1322,10 +1367,10 @@ class Dashboard:
         if speed >= 1024:
             return f"{speed / 1024:.2f} KB/s"
 
-        return f"{speed:.0f} B/s"
+        return f"{speed:.2f} B/s"
 
     def set_speed_card(self, card, speed, accent):
-        speed = max(0.0, float(speed))
+        speed = max(0.0, self.safe_number(speed))
 
         if speed >= 1024 * 1024:
             value = speed / (1024 * 1024)
@@ -1475,7 +1520,7 @@ class Dashboard:
 
         for timestamp, download, upload in self.traffic_history:
             history.append({
-                "seconds_ago": round(timestamp - now, 2),
+                "seconds_ago": round(max(0, now - timestamp), 2),
                 "download_bytes_per_second": round(download, 2),
                 "upload_bytes_per_second": round(upload, 2)
             })
@@ -1596,7 +1641,10 @@ class Dashboard:
                     writer.writerow(["CONNECTION"])
 
                     for key, value in data["connection"].items():
-                        writer.writerow([key, value])
+                        writer.writerow([
+                            key,
+                            "N/A" if value is None else value
+                        ])
 
                     writer.writerow([])
                     writer.writerow(["SPEED STATISTICS"])

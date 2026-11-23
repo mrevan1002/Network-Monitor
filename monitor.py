@@ -3,6 +3,7 @@ import platform
 import re
 import socket
 import subprocess
+import threading
 import time
 import ipaddress
 
@@ -10,10 +11,10 @@ import psutil
 
 
 class NetworkMonitor:
-
     PING_HOSTS = ("1.1.1.1", "8.8.8.8")
 
     def __init__(self, ping_target="1.1.1.1"):
+        self._lock = threading.RLock()
         self.ping_target = ping_target
 
         self.connection_targets = [
@@ -35,33 +36,48 @@ class NetworkMonitor:
                 "Enter a valid IPv4 or IPv6 address."
             ) from error
 
-        self.ping_target = host
+        with self._lock:
+            self.ping_target = host
+
+    def _get_ping_target(self, host=None):
+        if host is not None:
+            return host.strip()
+
+        with self._lock:
+            return self.ping_target
 
     @staticmethod
     def _read_network_counters():
-        counters = psutil.net_io_counters(pernic=False)
+        try:
+            counters = psutil.net_io_counters(pernic=False)
 
-        if counters is None:
+            if counters is None:
+                return 0, 0
+
+            return counters.bytes_recv, counters.bytes_sent
+
+        except (psutil.Error, OSError):
             return 0, 0
-
-        return counters.bytes_recv, counters.bytes_sent
 
     def reset_speed_baseline(self):
         """Reset counters after monitoring resumes."""
-        self._previous_time = time.monotonic()
-        self._previous_counters = self._read_network_counters()
+        with self._lock:
+            self._previous_time = time.monotonic()
+            self._previous_counters = self._read_network_counters()
 
     def get_speed(self):
-        current_time = time.monotonic()
-        current_counters = self._read_network_counters()
+        """Return download and upload speed in bytes per second."""
+        with self._lock:
+            current_time = time.monotonic()
+            current_counters = self._read_network_counters()
 
-        elapsed = current_time - self._previous_time
+            elapsed = current_time - self._previous_time
 
-        previous_recv, previous_sent = self._previous_counters
-        current_recv, current_sent = current_counters
+            previous_recv, previous_sent = self._previous_counters
+            current_recv, current_sent = current_counters
 
-        self._previous_time = current_time
-        self._previous_counters = current_counters
+            self._previous_time = current_time
+            self._previous_counters = current_counters
 
         if elapsed <= 0:
             return 0.0, 0.0
@@ -71,108 +87,133 @@ class NetworkMonitor:
 
         return download / elapsed, upload / elapsed
 
-    def get_ping(self, host=None):
-        host = host or self.ping_target
-
+    @staticmethod
+    def _valid_ip(host):
         try:
             ipaddress.ip_address(host)
+            return True
         except ValueError:
-            return None
+            return False
 
-        if platform.system().lower() == "windows":
-            command = ["ping", "-n", "1", "-w", "2000", host]
-        else:
-            command = ["ping", "-c", "1", "-W", "2", host]
+    @staticmethod
+    def _ping_command(host, count=1):
+        system = platform.system().lower()
 
+        if system == "windows":
+            return ["ping", "-n", str(count), "-w", "2000", host]
+
+        if system == "darwin":
+            return ["ping", "-c", str(count), "-W", "2000", host]
+
+        return ["ping", "-c", str(count), "-W", "2", host]
+
+    @staticmethod
+    def _run_ping(command, timeout):
         try:
-            result = subprocess.run(
+            return subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=timeout,
                 check=False,
                 errors="replace",
             )
+        except (subprocess.SubprocessError, OSError):
+            return None
 
-            output = result.stdout + result.stderr
+    @staticmethod
+    def _parse_ping_time(output):
+        # Windows may report: time<1ms
+        if re.search(r"time\s*<\s*1\s*ms", output, re.IGNORECASE):
+            return 0.5
 
-            if result.returncode != 0:
+        # Windows/Linux may report: time=12ms or time=12.34 ms
+        # Decimal commas are also accepted.
+        match = re.search(
+            r"time\s*[=<]\s*(\d+(?:[.,]\d+)?)\s*ms",
+            output,
+            re.IGNORECASE,
+        )
+
+        if not match:
+            return None
+
+        try:
+            return float(match.group(1).replace(",", "."))
+        except ValueError:
+            return None
+
+    def get_ping(self, host=None):
+        host = self._get_ping_target(host)
+
+        if not self._valid_ip(host):
+            return None
+
+        result = self._run_ping(
+            self._ping_command(host, count=1),
+            timeout=4,
+        )
+
+        if result is None or result.returncode != 0:
+            return None
+
+        output = result.stdout + result.stderr
+        return self._parse_ping_time(output)
+
+    @staticmethod
+    def _parse_packet_loss(output):
+        # Works with Windows: (0% loss)
+        # and Linux: 0% packet loss
+        match = re.search(
+            r"(\d+(?:[.,]\d+)?)%\s*(?:packet\s*)?loss",
+            output,
+            re.IGNORECASE,
+        )
+
+        if match:
+            try:
+                return float(match.group(1).replace(",", "."))
+            except ValueError:
                 return None
 
-            if re.search(
-                r"time\s*<\s*1\s*ms",
-                output,
-                re.IGNORECASE,
-            ):
-                return 0.5
+        # Fallback for Windows output:
+        # Sent = 4, Received = 3, Lost = 1
+        sent_match = re.search(
+            r"Sent\s*=\s*(\d+)",
+            output,
+            re.IGNORECASE,
+        )
+        lost_match = re.search(
+            r"Lost\s*=\s*(\d+)",
+            output,
+            re.IGNORECASE,
+        )
 
-            match = re.search(
-                r"time\s*[=<]\s*(\d+(?:\.\d+)?)\s*ms",
-                output,
-                re.IGNORECASE,
-            )
+        if sent_match and lost_match:
+            sent = int(sent_match.group(1))
+            lost = int(lost_match.group(1))
 
-            if match:
-                return float(match.group(1))
+            if sent > 0:
+                return (lost / sent) * 100
 
-            return None
-
-        except (subprocess.SubprocessError, OSError):
-            return None
+        return None
 
     def get_packet_loss(self, host=None):
-        host = host or self.ping_target
+        host = self._get_ping_target(host)
 
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
+        if not self._valid_ip(host):
             return None
 
-        if platform.system().lower() == "windows":
-            command = ["ping", "-n", "4", "-w", "2000", host]
-        else:
-            command = ["ping", "-c", "4", "-W", "2", host]
+        result = self._run_ping(
+            self._ping_command(host, count=4),
+            timeout=11,
+        )
 
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                errors="replace",
-            )
-
-            output = result.stdout + result.stderr
-
-            patterns = [
-                r"\((\d+(?:\.\d+)?)%\s*loss\)",
-                r"(\d+(?:\.\d+)?)%\s*(?:packet\s*)?loss",
-            ]
-
-            for pattern in patterns:
-                match = re.search(
-                    pattern,
-                    output,
-                    re.IGNORECASE,
-                )
-
-                if match:
-                    return float(match.group(1))
-
-            match = re.search(
-                r"Lost\s*=\s*(\d+)",
-                output,
-                re.IGNORECASE,
-            )
-
-            if match:
-                return float(int(match.group(1)) * 25)
-
+        if result is None:
             return None
 
-        except (subprocess.SubprocessError, OSError):
-            return None
+        output = result.stdout + result.stderr
+        return self._parse_packet_loss(output)
 
     def get_network_status(self):
         for host, port in self.connection_targets:
@@ -259,5 +300,5 @@ class NetworkMonitor:
 
             return "Unknown", "N/A"
 
-        except Exception:
+        except (psutil.Error, OSError):
             return "Unknown", "N/A"

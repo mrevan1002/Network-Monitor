@@ -1,36 +1,24 @@
-# Network Monitor v3.2
+# Network Monitor
 
-A real-time network monitoring application built with Python. Monitor your internet connection, network speed, latency, packet loss, and network traffic through a modern desktop dashboard.
+A real-time network monitoring desktop application built with Python. Monitor network traffic, connection quality, latency, and interface information through a modern graphical dashboard.
 
 ## Overview
 
-Network Monitor is a desktop application designed to provide real-time insights into network performance.
-
-It combines live network statistics, graphical traffic visualization, connectivity checks, and configurable monitoring settings in a clean, dark-themed interface.
+Network Monitor is a desktop application designed to track network performance and visualize live network activity. It provides useful insights into download and upload speeds, latency, packet loss, and connection status.
 
 ## Features
 
-- **Real-Time Speed Monitoring** — Track download and upload speeds.
-- **Network Traffic Graph** — Visualize network activity over the last 60 seconds.
-- **Speed Statistics** — View current, maximum, and average speeds.
-- **Ping Monitoring** — Measure network latency using configurable IPv4 or IPv6 targets.
-- **Packet Loss Detection** — Monitor packet loss percentage.
-- **Jitter Calculation** — Calculate latency variation between consecutive successful ping measurements.
-- **TCP Connectivity Check** — Verify network connectivity independently of ICMP ping.
-- **Network Interface Information** — Display the active network interface and local IP address.
-- **Traffic Statistics** — Track total downloaded and uploaded data.
-- **CSV and JSON Export** — Export network monitoring reports.
-- **Pause and Resume** — Temporarily pause and resume monitoring.
-- **Customizable Settings** — Configure monitoring intervals and warning thresholds.
-- **Modern Desktop Interface** — Dark-themed dashboard built with CustomTkinter.
-
-## Screenshots
-
-<!-- Add application screenshots here -->
-
-<!-- Example:
-![Network Monitor Dashboard](screenshots/dashboard.png)
--->
+- **Real-Time Traffic Monitoring** – Track download and upload speeds.
+- **Live Traffic Visualization** – View network activity through dynamic graphs.
+- **Ping Monitoring** – Measure network response time.
+- **Packet Loss Detection** – Monitor packet transmission reliability.
+- **Jitter Monitoring** – Observe variations in network latency.
+- **Connection Status** – Detect network connectivity.
+- **Network Interface Information** – Display the active interface and local IP address.
+- **Traffic Statistics** – View average speed, maximum speed, and total traffic.
+- **Data Export** – Export monitoring reports in CSV and JSON formats.
+- **Pause and Resume** – Control monitoring sessions.
+- **Custom Ping Target** – Configure the target IP address for latency measurements.
 
 ## Technologies Used
 
@@ -38,80 +26,50 @@ It combines live network statistics, graphical traffic visualization, connectivi
 - CustomTkinter
 - Matplotlib
 - psutil
-- Socket
-- Threading
-
-## Requirements
-
-- Python 3.10 or newer
-- Windows, Linux, or macOS
-- Internet connection for network checks
-
-## Installation
-
-**1. Clone the repository**
-
-```bash
-git clone https://github.com/mrevan1002/Network-Monitor.git
-```
-
-**2. Navigate to the project directory**
-
-```bash
-cd Network-Monitor
-```
-
-**3. Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-
-**4. Run the application**
-
-```bash
-python main.py
-```
+- OpenCV (only if actually used; otherwise omit)
 
 ## Project Structure
 
 ```text
 Network-Monitor/
-│
 ├── main.py
 ├── dashboard.py
 ├── monitor.py
 ├── requirements.txt
 ├── README.md
 ├── LICENSE
-└── .gitignore
+└── screenshots/
 ```
 
-## Configuration
+## Installation
 
-The Settings panel provides options to configure:
+1. Clone the repository:
 
-- Ping target (IPv4 or IPv6)
-- Speed monitoring interval
-- High ping warning threshold
-- Packet loss warning threshold
+```bash
+git clone https://github.com/mrevan1002/Network-Monitor.git
+```
 
-## Data Export
+2. Navigate to the project directory:
 
-Network monitoring reports can be exported in:
+```bash
+cd Network-Monitor
+```
 
-- CSV format
-- JSON format
+3. Install dependencies:
 
-Reports include connection information, speed statistics, session details, and recent traffic history.
+```bash
+pip install -r requirements.txt
+```
 
-## Technical Notes
+4. Run the application:
 
-- Ping and packet loss measurements depend on the availability of the selected target.
-- Some networks may block ICMP requests.
-- TCP connectivity checks are performed separately from ICMP ping measurements.
-- Network speed measurements represent traffic observed by the computer.
-- Network monitoring results may vary depending on the operating system and network environment.
+```bash
+python main.py
+```
+
+## Screenshots
+
+Screenshots of the application will be added here.
 
 ## License
 
@@ -119,6 +77,4 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Author
 
-Developed as a Python network monitoring project.
-
-**GitHub:** [@mrevan1002](https://github.com/mrevan1002)
+Developed as a Python desktop application project.
