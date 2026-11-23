@@ -1,4 +1,3 @@
-
 import customtkinter as ctk
 import time
 import threading
@@ -14,7 +13,7 @@ from tkinter import filedialog, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from monitor import NetworkMonitor
+from monitor import NetworkMonitor, calculate_jitter_ewma
 
 
 # ===================== THEME =====================
@@ -43,7 +42,7 @@ class Dashboard:
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
-        self.root.title("Network Monitor 3.2")
+        self.root.title("Network Monitor 4.2")
         self.root.geometry("1400x920")
         self.root.minsize(1120, 780)
         self.root.configure(fg_color=BG)
@@ -53,6 +52,8 @@ class Dashboard:
 
         self.running = True
         self.monitoring_enabled = True
+
+        self.shutdown_event = threading.Event()
 
         self.monitor_generation = 0
         self.ping_generation = 0
@@ -68,9 +69,11 @@ class Dashboard:
         self.traffic_history = deque()
 
         self.successful_pings = deque(maxlen=10)
+        self.ping_results = deque(maxlen=10)
+        self.previous_successful_ping = None
         self.jitter_value = None
 
-        self.last_speed_timestamp = None
+        self.last_speed_timestamp = time.monotonic()
 
         self.download_total = 0.0
         self.upload_total = 0.0
@@ -84,6 +87,7 @@ class Dashboard:
         self.download_sum = 0.0
         self.upload_sum = 0.0
         self.sample_count = 0
+        self.observed_seconds = 0.0
 
         self.latest_ping = None
         self.latest_loss = None
@@ -98,15 +102,22 @@ class Dashboard:
         self.root.after(100, self.process_queue)
         self.root.after(1000, self.update_dashboard)
 
-        threading.Thread(
-            target=self.background_speed_monitor,
-            daemon=True
-        ).start()
+        self.worker_threads = []
+        workers = (
+            self.background_speed_monitor,
+            self.background_ping_monitor,
+            self.background_connection_monitor,
+            self.background_interface_monitor,
+        )
 
-        threading.Thread(
-            target=self.background_metrics,
-            daemon=True
-        ).start()
+        for worker in workers:
+            thread = threading.Thread(
+                target=worker,
+                name=f"NetworkMonitor-{worker.__name__}",
+                daemon=True,
+            )
+            self.worker_threads.append(thread)
+            thread.start()
 
     # ===================== HELPERS =====================
 
@@ -767,35 +778,45 @@ class Dashboard:
         self.settings_window = window
 
         window.title("Network Monitor Settings")
-        window.geometry("430x510")
         window.resizable(False, False)
         window.configure(fg_color=BG)
         window.transient(self.root)
         window.grab_set()
 
-        ctk.CTkLabel(
+        available_height = max(360, window.winfo_screenheight() - 100)
+        window.geometry(f"450x{min(650, available_height)}")
+
+        content = ctk.CTkScrollableFrame(
             window,
+            fg_color=BG,
+            scrollbar_button_color=BLUE,
+            scrollbar_button_hover_color="#3974D8"
+        )
+        content.pack(fill="both", expand=True, padx=8, pady=8)
+
+        ctk.CTkLabel(
+            content,
             text="Monitoring Settings",
             font=("Segoe UI", 22, "bold"),
             text_color=TEXT
         ).pack(anchor="w", padx=25, pady=(25, 5))
 
         ctk.CTkLabel(
-            window,
+            content,
             text="Configure network checks and warning thresholds.",
             font=("Segoe UI", 11),
             text_color=MUTED
         ).pack(anchor="w", padx=25, pady=(0, 20))
 
         ctk.CTkLabel(
-            window,
+            content,
             text="Ping target (IPv4 / IPv6)",
             font=("Segoe UI", 12, "bold"),
             text_color=TEXT
         ).pack(anchor="w", padx=25)
 
         target_entry = ctk.CTkEntry(
-            window,
+            content,
             width=375,
             height=38,
             fg_color=PANEL,
@@ -806,21 +827,21 @@ class Dashboard:
         target_entry.insert(0, self.monitor.ping_target)
 
         ctk.CTkLabel(
-            window,
+            content,
             text="Examples: 1.1.1.1  •  8.8.8.8  •  custom IP",
             font=("Segoe UI", 10),
             text_color=MUTED
         ).pack(anchor="w", padx=25, pady=(0, 15))
 
         ctk.CTkLabel(
-            window,
+            content,
             text="Speed update interval",
             font=("Segoe UI", 12, "bold"),
             text_color=TEXT
         ).pack(anchor="w", padx=25)
 
         interval_menu = ctk.CTkOptionMenu(
-            window,
+            content,
             values=["1 second", "2 seconds", "3 seconds"],
             width=375,
             height=36,
@@ -841,14 +862,14 @@ class Dashboard:
         )
 
         ctk.CTkLabel(
-            window,
+            content,
             text="High ping warning threshold (ms)",
             font=("Segoe UI", 12, "bold"),
             text_color=TEXT
         ).pack(anchor="w", padx=25)
 
         ping_entry = ctk.CTkEntry(
-            window,
+            content,
             width=375,
             height=36,
             fg_color=PANEL,
@@ -858,14 +879,14 @@ class Dashboard:
         ping_entry.insert(0, str(self.ping_warning_ms))
 
         ctk.CTkLabel(
-            window,
+            content,
             text="Packet loss warning threshold (%)",
             font=("Segoe UI", 12, "bold"),
             text_color=TEXT
         ).pack(anchor="w", padx=25)
 
         loss_entry = ctk.CTkEntry(
-            window,
+            content,
             width=375,
             height=36,
             fg_color=PANEL,
@@ -875,7 +896,7 @@ class Dashboard:
         loss_entry.insert(0, str(self.loss_warning_percent))
 
         buttons = ctk.CTkFrame(
-            window,
+            content,
             fg_color="transparent"
         )
         buttons.pack(fill="x", padx=25, pady=(0, 20))
@@ -925,6 +946,8 @@ class Dashboard:
                 )
                 return
 
+            old_target = self.monitor.ping_target
+
             try:
                 self.monitor.set_ping_target(target)
             except ValueError as error:
@@ -948,14 +971,17 @@ class Dashboard:
             self.ping_warning_ms = ping_threshold
             self.loss_warning_percent = loss_threshold
 
-            self.ping_generation += 1
-            self.clear_queue()
+            if target != old_target:
+                self.ping_generation += 1
+                self.clear_queue()
 
-            self.latest_ping = None
-            self.latest_loss = None
+                self.latest_ping = None
+                self.latest_loss = None
 
-            self.successful_pings.clear()
-            self.jitter_value = None
+                self.successful_pings.clear()
+                self.ping_results.clear()
+                self.previous_successful_ping = None
+                self.jitter_value = None
 
             self.ping_target_label.configure(
                 text=self.shorten_text(target, 25)
@@ -965,18 +991,20 @@ class Dashboard:
                 text=f"PING • {self.shorten_text(target, 22)}"
             )
 
-            self.ping_card["value"].configure(
-                text="Checking...",
-                text_color=YELLOW
-            )
+            if target != old_target:
+                self.ping_card["value"].configure(
+                    text="Checking...",
+                    text_color=YELLOW
+                )
 
-            self.loss_card["value"].configure(
-                text="Checking...",
-                text_color=YELLOW
-            )
+                self.loss_card["value"].configure(
+                    text="Checking...",
+                    text_color=YELLOW
+                )
 
-            self.sidebar_jitter_label.configure(text="N/A")
+                self.sidebar_jitter_label.configure(text="N/A")
 
+            self.update_metric_cards()
             close_settings()
 
         ctk.CTkButton(
@@ -1019,10 +1047,9 @@ class Dashboard:
         self.clear_queue()
 
         if self.monitoring_enabled:
-            self.last_speed_timestamp = None
-
             try:
                 self.monitor.reset_speed_baseline()
+                self.last_speed_timestamp = time.monotonic()
             except Exception as error:
                 print("Speed baseline reset error:", error)
 
@@ -1044,15 +1071,17 @@ class Dashboard:
     # ===================== BACKGROUND SPEED =====================
 
     def background_speed_monitor(self):
-        while self.running:
+        while self.running and not self.shutdown_event.is_set():
             if not self.monitoring_enabled:
-                time.sleep(0.2)
+                self.shutdown_event.wait(0.2)
                 continue
 
             generation = self.monitor_generation
 
             try:
-                download, upload = self.monitor.get_speed()
+                download, upload, downloaded_bytes, uploaded_bytes = (
+                    self.monitor.get_speed_sample()
+                )
 
                 if (
                     self.running
@@ -1068,105 +1097,121 @@ class Dashboard:
                         "upload": max(
                             0.0, self.safe_number(upload)
                         ),
+                        "downloaded_bytes": max(0, int(downloaded_bytes)),
+                        "uploaded_bytes": max(0, int(uploaded_bytes)),
                         "timestamp": time.monotonic()
                     })
 
             except Exception as error:
                 print("Speed monitor error:", error)
 
-            time.sleep(self.speed_interval)
+            self.shutdown_event.wait(self.speed_interval)
 
     # ===================== BACKGROUND METRICS =====================
 
-    def background_metrics(self):
-        last_ping = 0
-        last_loss = 0
-        last_status = 0
-        last_interface = 0
+    def _worker_wait(self, seconds):
+        self.shutdown_event.wait(seconds)
 
-        ping_value = None
-        loss_value = None
-        status_value = "Checking"
-        interface_name = "Loading..."
-        local_ip = "Loading..."
 
-        previous_target = self.monitor.ping_target
-        previous_ping_generation = self.ping_generation
+    def _queue_metric(
+        self,
+        metric_type,
+        generation,
+        ping_generation=None,
+        target=None,
+        **values
+    ):
+        if not self.running or not self.monitoring_enabled:
+            return
 
-        while self.running:
+        if generation != self.monitor_generation:
+            return
+
+        payload = {
+            "type": metric_type,
+            "generation": generation,
+            **values
+        }
+
+        if ping_generation is not None:
+            payload["ping_generation"] = ping_generation
+            payload["target"] = target
+
+        self.data_queue.put(payload)
+
+    def background_ping_monitor(self):
+        while self.running and not self.shutdown_event.is_set():
             if not self.monitoring_enabled:
-                time.sleep(0.2)
+                self.shutdown_event.wait(0.2)
                 continue
 
             generation = self.monitor_generation
-            target = self.monitor.ping_target
             ping_generation = self.ping_generation
-
-            now = time.monotonic()
-            ping_updated = False
-
-            if (
-                previous_target != target
-                or previous_ping_generation != ping_generation
-            ):
-                previous_target = target
-                previous_ping_generation = ping_generation
-
-                last_ping = 0
-                last_loss = 0
-
-                ping_value = None
-                loss_value = None
+            target = self.monitor.ping_target
 
             try:
-                if now - last_ping >= 5:
-                    ping_value = self.monitor.get_ping(target)
-                    last_ping = time.monotonic()
-                    ping_updated = True
+                value = self.monitor.get_ping(target)
 
-                if now - last_loss >= 15:
-                    loss_value = self.monitor.get_packet_loss(target)
-                    last_loss = time.monotonic()
-
-                if now - last_status >= 3:
-                    status_value = self.monitor.get_network_status()
-                    last_status = time.monotonic()
-
-                if now - last_interface >= 5:
-                    interface_name, local_ip = (
-                        self.monitor.get_interface_info()
-                    )
-                    last_interface = time.monotonic()
-
-                if (
-                    self.running
-                    and self.monitoring_enabled
-                    and generation == self.monitor_generation
-                    and ping_generation == self.ping_generation
-                    and target == self.monitor.ping_target
-                ):
-                    self.data_queue.put({
-                        "type": "metrics",
-                        "generation": generation,
-                        "ping_generation": ping_generation,
-                        "target": target,
-                        "ping": ping_value,
-                        "ping_updated": ping_updated,
-                        "loss": loss_value,
-                        "status": status_value,
-                        "interface": interface_name,
-                        "ip": local_ip
-                    })
+                self._queue_metric(
+                    "ping",
+                    generation,
+                    ping_generation,
+                    target,
+                    ping=value
+                )
 
             except Exception as error:
-                print("Metrics error:", error)
+                print("Ping monitor error:", error)
 
-            time.sleep(self.metrics_interval)
+            self._worker_wait(5)
+
+    def background_connection_monitor(self):
+        while self.running and not self.shutdown_event.is_set():
+            if not self.monitoring_enabled:
+                self.shutdown_event.wait(0.2)
+                continue
+
+            generation = self.monitor_generation
+
+            try:
+                value = self.monitor.get_network_status()
+                self._queue_metric(
+                    "status",
+                    generation,
+                    status=value
+                )
+
+            except Exception as error:
+                print("Connection monitor error:", error)
+
+            self._worker_wait(3)
+
+    def background_interface_monitor(self):
+        while self.running and not self.shutdown_event.is_set():
+            if not self.monitoring_enabled:
+                self.shutdown_event.wait(0.2)
+                continue
+
+            generation = self.monitor_generation
+
+            try:
+                interface, local_ip = self.monitor.get_interface_info()
+
+                self._queue_metric(
+                    "interface",
+                    generation,
+                    interface=interface,
+                    ip=local_ip
+                )
+
+            except Exception as error:
+                print("Interface monitor error:", error)
+
+            self._worker_wait(5)
 
     # ===================== JITTER =====================
 
     def update_jitter(self, ping):
-        # Timeout does not erase the last valid jitter result.
         if ping is None:
             return
 
@@ -1175,21 +1220,15 @@ class Dashboard:
         if ping is None:
             return
 
+        self.jitter_value = calculate_jitter_ewma(
+            self.jitter_value,
+            self.previous_successful_ping,
+            ping,
+            alpha=0.25
+        )
+
+        self.previous_successful_ping = ping
         self.successful_pings.append(ping)
-
-        if len(self.successful_pings) < 2:
-            self.jitter_value = None
-            return
-
-        differences = [
-            abs(
-                self.successful_pings[index]
-                - self.successful_pings[index - 1]
-            )
-            for index in range(1, len(self.successful_pings))
-        ]
-
-        self.jitter_value = sum(differences) / len(differences)
 
     # ===================== QUEUE PROCESSING =====================
 
@@ -1214,12 +1253,14 @@ class Dashboard:
                 upload = data["upload"]
                 timestamp = data["timestamp"]
 
-                if self.last_speed_timestamp is not None:
-                    elapsed = timestamp - self.last_speed_timestamp
+                self.download_total += data.get("downloaded_bytes", 0)
+                self.upload_total += data.get("uploaded_bytes", 0)
 
-                    if 0 < elapsed <= 5:
-                        self.download_total += download * elapsed
-                        self.upload_total += upload * elapsed
+                if self.last_speed_timestamp is not None:
+                    sample_elapsed = timestamp - self.last_speed_timestamp
+
+                    if 0 < sample_elapsed <= 10:
+                        self.observed_seconds += sample_elapsed
 
                 self.last_speed_timestamp = timestamp
 
@@ -1252,22 +1293,55 @@ class Dashboard:
 
                 self.update_statistics()
 
-            elif data["type"] == "metrics":
+            elif data["type"] == "ping":
                 if (
                     data.get("ping_generation") != self.ping_generation
                     or data.get("target") != self.monitor.ping_target
                 ):
                     continue
 
-                self.latest_ping = data["ping"]
-                self.latest_loss = data["loss"]
-                self.latest_status = str(data["status"])
-                self.latest_ip = str(data["ip"])
-                self.latest_interface = str(data["interface"])
+                self.latest_ping = data.get("ping")
 
-                if data.get("ping_updated", False):
+                # Each individual ping contributes exactly one success/failure
+                # sample to the same rolling window (last 10 probes).
+                self.ping_results.append(self.latest_ping is not None)
+
+                if self.latest_ping is not None:
                     self.update_jitter(self.latest_ping)
+                else:
+                    # A failed probe breaks the consecutive-sample chain.
+                    # Do not calculate jitter across an outage or timeout.
+                    self.previous_successful_ping = None
+                    self.jitter_value = None
+                    self.successful_pings.clear()
 
+                if len(self.ping_results) == self.ping_results.maxlen:
+                    lost = self.ping_results.count(False)
+                    self.latest_loss = (
+                        lost / len(self.ping_results)
+                    ) * 100.0
+                else:
+                    # Do not claim 0% until a complete 10-probe window exists.
+                    self.latest_loss = None
+
+                self.update_metric_cards()
+
+            elif data["type"] == "status":
+                self.latest_status = str(
+                    data.get("status", "Checking")
+                )
+                if self.latest_status.lower() == "disconnected":
+                    # Clear the jitter baseline while the connection is down.
+                    self.previous_successful_ping = None
+                    self.jitter_value = None
+                    self.successful_pings.clear()
+                self.update_metric_cards()
+
+            elif data["type"] == "interface":
+                self.latest_ip = str(data.get("ip", "N/A"))
+                self.latest_interface = str(
+                    data.get("interface", "Unknown")
+                )
                 self.update_metric_cards()
 
         if self.running:
@@ -1288,6 +1362,7 @@ class Dashboard:
         if self.latest_ping is None:
             ping_text = "Timeout / N/A"
             ping_color = RED
+
         else:
             ping_text = (
                 "<1 ms" if self.latest_ping < 1
@@ -1308,6 +1383,7 @@ class Dashboard:
         if self.latest_loss is None:
             loss_text = "N/A"
             loss_color = MUTED
+
         else:
             loss_text = f"{self.latest_loss:.0f}%"
 
@@ -1328,11 +1404,13 @@ class Dashboard:
                 text="Online",
                 text_color=GREEN
             )
+
         elif self.latest_status == "Disconnected":
             self.status_card["value"].configure(
                 text="Offline",
                 text_color=RED
             )
+
         else:
             self.status_card["value"].configure(
                 text="Checking",
@@ -1375,9 +1453,11 @@ class Dashboard:
         if speed >= 1024 * 1024:
             value = speed / (1024 * 1024)
             unit = "MB/s"
+
         elif speed >= 1024:
             value = speed / 1024
             unit = "KB/s"
+
         else:
             value = speed
             unit = "B/s"
@@ -1394,8 +1474,15 @@ class Dashboard:
         if self.sample_count == 0:
             return
 
-        average_download = self.download_sum / self.sample_count
-        average_upload = self.upload_sum / self.sample_count
+        average_download = (
+            self.download_total / self.observed_seconds
+            if self.observed_seconds > 0 else 0.0
+        )
+
+        average_upload = (
+            self.upload_total / self.observed_seconds
+            if self.observed_seconds > 0 else 0.0
+        )
 
         self.max_download_card.configure(
             text=self.format_speed(self.max_download)
@@ -1444,9 +1531,11 @@ class Dashboard:
         if maximum_speed >= 1024 * 1024:
             divisor = 1024 * 1024
             unit = "MB/s"
+
         elif maximum_speed >= 1024:
             divisor = 1024
             unit = "KB/s"
+
         else:
             divisor = 1
             unit = "B/s"
@@ -1504,13 +1593,13 @@ class Dashboard:
         elapsed = int(time.time() - self.start_time)
 
         average_download = (
-            self.download_sum / self.sample_count
-            if self.sample_count else 0
+            self.download_total / self.observed_seconds
+            if self.observed_seconds > 0 else 0.0
         )
 
         average_upload = (
-            self.upload_sum / self.sample_count
-            if self.sample_count else 0
+            self.upload_total / self.observed_seconds
+            if self.observed_seconds > 0 else 0.0
         )
 
         now = time.monotonic()
@@ -1527,7 +1616,9 @@ class Dashboard:
 
         return {
             "project": "Network Monitor",
-            "version": "3.2",
+            "version": "4.2",
+            "speed_unit": "bytes per second",
+            "packet_loss_probe_count": self.monitor.PACKET_LOSS_PING_COUNT,
             "generated_at": datetime.now().isoformat(
                 timespec="seconds"
             ),
@@ -1551,7 +1642,9 @@ class Dashboard:
                     if self.jitter_value is not None
                     else None
                 ),
-                "jitter_sample_count": len(self.successful_pings)
+                "jitter_sample_count": len(self.successful_pings),
+                "jitter_method": "EWMA",
+                "jitter_alpha": 0.25
             },
             "speed": {
                 "current_download_bytes_per_second": round(
@@ -1687,20 +1780,26 @@ class Dashboard:
 
         self.running = False
         self.monitoring_enabled = False
+        self.shutdown_event.set()
         self.monitor_generation += 1
+        self.clear_queue()
 
         if self.settings_window is not None:
             try:
                 self.settings_window.destroy()
             except Exception:
                 pass
-
             self.settings_window = None
+
+        for thread in getattr(self, "worker_threads", []):
+            if thread.is_alive():
+                thread.join(timeout=0.2)
 
         try:
             self.root.destroy()
         except Exception:
             pass
+
 
     def run(self):
         self.root.protocol(
