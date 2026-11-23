@@ -26,7 +26,6 @@ Network Monitor is a desktop application designed to track network performance a
 - CustomTkinter
 - Matplotlib
 - psutil
-- OpenCV (only if actually used; otherwise omit)
 
 ## Project Structure
 
@@ -38,7 +37,11 @@ Network-Monitor/
 ├── requirements.txt
 ├── README.md
 ├── LICENSE
-└── screenshots/
+└── Screenshots/
+    ├── dashboard.png
+    ├── settings.png
+    ├── export.png
+    └── live-paused.png
 ```
 
 ## Installation
@@ -69,7 +72,21 @@ python main.py
 
 ## Screenshots
 
-Screenshots of the application will be added here.
+### Dashboard
+
+![Network Monitor Dashboard](Screenshots/dashboard.png)
+
+### Settings
+
+![Network Monitor Settings](Screenshots/settings.png)
+
+### Data Export
+
+![Network Monitor Export](Screenshots/export.png)
+
+### Live / Paused Monitoring
+
+![Network Monitor Live and Paused](Screenshots/live-paused.png)
 
 ## License
 
